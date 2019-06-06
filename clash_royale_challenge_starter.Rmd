@@ -1,0 +1,198 @@
+---
+title: "Clash Royale Challenge Starter Notebook"
+output: html_notebook
+---
+
+```{r, include=F}
+# Load necessary packages
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+    tidyverse,
+    readr,
+    e1071
+)
+```
+
+```{r}
+# Read data and present
+
+train = read_csv('trainingData.csv')
+valid = read_csv('validationData.csv')
+train %>% head()
+```
+
+```{r}
+# Helper function to preprocess data to bag-of-cards format
+
+to_bag_of_cards <- function(data, sep = ';') {
+    data = data %>%
+        mutate(
+            deck = str_split(deck, sep),
+            ind = 1:nrow(data),
+            value = 1
+        ) %>%
+        unnest(deck) %>%
+        spread('deck', value, fill = 0)
+    return(data)
+}
+
+train = to_bag_of_cards(train)
+valid = to_bag_of_cards(valid)
+train %>% head()
+```
+
+```{r}
+valid %>% head()
+```
+
+```{r}
+# Sort data by number of games played
+
+train = train %>%
+    arrange(desc(nofGames))
+valid = valid %>%
+    arrange(desc(nofGames))
+```
+
+```{r}
+library(Rfast)
+
+get_deck_score <- function(deck, chosen_decks, diffC) {
+  #deck_cards = deck[-(1:4)]
+  #chosen_decks_cards = chosen_decks[-(1:4)]
+  #diff = sum(dista(deck_cards, matrix(chosen_decks_cards), type='manhattan'))
+  diff = sum(deck[-(1:4)] != chosen_decks[-(1:4)])
+  #print(diff)
+  score = diffC * diff + (1 - diffC) * deck[1]
+}
+
+diffC = 0.5
+deckSet_size = 10
+deckSet_idx = numeric(deckSet_size)
+deckSet_idx[1] = train[train$nofGames == max(train$nofGames),]$ind
+sapply(1:(deckSet_size-1), function(i) {
+  print(deckSet_idx)
+  scores = apply(train[-deckSet_idx,], 1, get_deck_score, chosen_decks=train[deckSet_idx,], diffC=diffC)
+  new_deck_idx = train[-deckSet_idx,][scores == max(scores),]$ind
+  deckSet_idx[i+1] <<- new_deck_idx
+})
+deckSet_idx
+```
+
+```{r}
+# Specify example model fitting function and R squared metric
+
+R2 <- function(x, y) 1 - sum((x - y) ^ 2) / sum((y - mean(y)) ^ 2)
+RSS <- function(x, y) sum((x - y) ^ 2)
+TSS <- function(x, y) sum((y - mean(y)) ^ 2)
+
+fit_svm <- function(data) {
+    return(svm(x = data %>% select(-nofGames, -nOfPlayers, -ind, -winRate),
+               y = data$winRate,
+               type = 'eps-regression',
+               kernel = 'radial',
+               gamma = 1.0 / 90,
+               #cost = 0.00000000001,
+               #epsilon = 0.00001,
+               scale = F))
+}
+
+fit_nu_svm <- function(data) {
+    return(svm(x = data %>% select(-nofGames, -nOfPlayers, -ind, -winRate),
+               y = data$winRate,
+               type = 'nu-regression',
+               kernel = 'radial',
+               gamma = 1.0 / 90,
+               nu = 0.01,
+               cost = 1,
+               na.action = na.fail,
+               scale = F))
+}
+```
+
+```{r}
+sizes = 6:15 * 100
+
+# Fit and predict on models of various training sizes
+
+fit_list = lapply(sizes, function(size) fit_svm(train[1:size,]))
+pred_list = lapply(fit_list, 
+                   function(fit) predict(fit, 
+                                         newdata = valid %>% select(-nofGames, -nOfPlayers, -ind, -winRate)))
+```
+
+```{r}
+# fit_nu_svm <- function(data) {
+#     return(ksvm(winRate~., data = data %>% select(-nofGames, -nOfPlayers, -ind),
+#                type = 'nu-svr',
+#                kernel = 'rbfdot',
+#                kpar = "automatic",
+#                nu = 0.01,
+#                epsilon = 1,
+#                scaled = F))
+# }
+
+train = as.data.frame(train)
+fit = fit_nu_svm(train)
+preds = predict(fit, newdata = valid %>% select(-nofGames, -nOfPlayers, -ind, -winRate))
+R2(preds, valid$winRate)
+train2 = train %>% select(-nofGames, -nOfPlayers, -ind, -winRate)
+all(train2[fit$index,]==fit$SV)
+fit2 = fit_svm(train[fit$index,])
+preds2 = predict(fit2, newdata = valid %>% select(-nofGames, -nOfPlayers, -ind, -winRate))
+R2(preds2, valid$winRate)
+```
+
+```{r}
+fit3 = fit_nu_svm(train[fit$index,])
+preds3 = predict(fit3, newdata = valid %>% select(-nofGames, -nOfPlayers, -ind, -winRate))
+R2(preds3, valid$winRate)
+dim(fit$SV)
+dim(fit3$SV)
+```
+
+```{r}
+t1 = Sys.time()
+
+svmEval = function(subset) {
+  fit = fit_svm(train[subset,])
+  preds = predict(fit, newdata = valid %>% select(-nofGames, -nOfPlayers, -ind, -winRate))
+  res = -R2(preds, valid$winRate)
+  res
+}
+
+pop_size = 30
+init_pop = t(matrix(1:(pop_size*900), ncol=pop_size, nrow=900))
+GA_sol = kofnGA(n=100000, k=900, popsize=pop_size, ngen=30, mutprob=0.05, OF=svmEval, verbose=1)
+fit = fit_svm(train[GA_sol$bestsol,])
+preds = predict(fit, newdata = valid %>% select(-nofGames, -nOfPlayers, -ind, -winRate))
+R2(preds, valid$winRate)
+
+t2 = Sys.time()
+message(t2 - t1, '\n\n')
+```
+
+```{r}
+# Calculate R squared scores
+
+r2 = unlist(lapply(pred_list, function(p) R2(p, valid$winRate)))
+plot(sizes, r2)
+```
+
+```{r}
+mean(r2)
+```
+
+```{r}
+# Save hyperparameteres and selected indices in submission format
+
+sub = unlist(lapply(sizes,
+                    function(size) paste(0.02, 1.0, 1.0 / 90,
+                                         paste(train$ind[1:size], collapse = ','),
+                                         sep = ';')))
+```
+
+```{r}
+writeLines(sub, con = 'example_sub.txt')
+```
